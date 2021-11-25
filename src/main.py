@@ -13,6 +13,11 @@
 import sys
 import platform
 import enum
+import json
+import argparse
+from datetime import datetime
+import queue
+import threading
 import sounddevice as sd
 import soundfile as sf
 
@@ -40,12 +45,26 @@ from PyQt5.QtCore    import Qt
 # Settings
 APP_NAME = "Media Player"
 
+# Audio
+PLAYBACK_DEVICE_NUMBER = 8
+BUFFER_SIZE = 20
+BLOCK_SIZE = 2048
+DATA_TYPE = "float32"
+NUM_CHANNELS = 1  # 2 does not work
+OUTPUT_STREAM_SAMPLE_RATE = 48000
 
-# Get default audio device using PyCAW
-devices = AudioUtilities.GetSpeakers()
-interface = devices.Activate(
-            IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-g_volume = cast(interface, POINTER(IAudioEndpointVolume))
+# Image paths
+PATH_VISUALIZATION_ANIM = "../resources/images/audioanim.jpg"
+
+
+# For windows
+g_volume = None
+if platform.system() == "Windows":
+    # Get default audio device using PyCAW
+    devices = AudioUtilities.GetSpeakers()
+    interface = devices.Activate(
+                IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+    g_volume = cast(interface, POINTER(IAudioEndpointVolume))
 
 
 #---------------------------------------------------------------------
@@ -69,6 +88,21 @@ class MsgBox(enum.IntEnum):
     WARN = 2
     ERROR = 3
 
+
+#---------------------------------------------------------------------
+# Logging
+
+
+
+#---------------------------------------------------------------------
+# Player state
+
+
+
+#---------------------------------------------------------------------
+#
+
+#---------------------------------------------------------------------
 def showMsg(strTitle, strMsg, msgType):
     msgBox = QMessageBox()
     if msgType == MsgBox.INFO:
@@ -127,13 +161,77 @@ def setVolume(levelPercent):
 
 
 #---------------------------------------------------------------------
+
+# def createRunningOutputStream(deviceIndex):
+#     print("Opening output stream for device:", deviceIndex)
+#     output = sd.OutputStream(
+#         device = deviceIndex,
+#         dtype  = DATA_TYPE,
+#         samplerate = OUTPUT_STREAM_SAMPLE_RATE,
+#         channels   = NUM_CHANNELS
+#     )
+#     output.start()
+#     return output
+
+
+def playAudioOnDevice(deviceNum, strAudioFilePath):
+    # Local queue created every time
+    q = queue.Queue(maxsize=BUFFER_SIZE)
+    event = threading.Event()
+    # Local nested closure
+    def callback(outdata, frames, time, status):
+        # print("callback")
+        assert frames == BLOCK_SIZE
+        if status.output_underflow:
+            print('Output underflow: increase blocksize?', file=sys.stderr)
+            raise sd.CallbackAbort
+        assert not status
+        try:
+            data = q.get_nowait()
+        except queue.Empty:
+            print('Buffer is empty: increase buffersize?', file=sys.stderr)
+            raise sd.CallbackAbort
+        if len(data) < len(outdata):
+            # Last blk
+            outdata[:len(data)] = data
+            outdata[len(data):] = b'\x00' * (len(outdata) - len(data))
+            raise sd.CallbackStop
+        else:
+            outdata[:] = data
+    # Actual code to initiate & control playback
+    try:
+        with sf.SoundFile(strAudioFilePath) as f:
+            for _ in range(BUFFER_SIZE):
+                data = f.buffer_read(BLOCK_SIZE, dtype=DATA_TYPE)
+                if not data:
+                    break
+                q.put_nowait(data)  # Pre-fill queue
+            stream = sd.RawOutputStream(
+                samplerate=f.samplerate, blocksize=BLOCK_SIZE,
+                device=deviceNum, channels=NUM_CHANNELS, dtype=DATA_TYPE,
+                callback=callback, finished_callback=event.set)
+            with stream:
+                timeout = BLOCK_SIZE * BUFFER_SIZE/ f.samplerate
+                while data:
+                    data = f.buffer_read(BLOCK_SIZE, dtype=DATA_TYPE)
+                    q.put(data, timeout=timeout)
+                event.wait()  # Wait until playback is finished
+    except KeyboardInterrupt:
+        print('Keyboard Interrupted by user')
+    except queue.Full:
+        # A timeout occurred, i.e. there was an error in the callback
+        print("Queue full")
+    except Exception as e:
+        print(type(e).__name__ + ': ' + str(e))
+
+#---------------------------------------------------------------------
 # Uses model-view
 class TrackInfoWithVolumeControlWidget(QWidget):
     """Play list widget"""
     def __init__(self, model=None, ctrlr=None, parent=None):
         QWidget.__init__(self, parent=parent)
         layMain = QHBoxLayout(self)
-        self._pixmapAudioAnim = QPixmap("../resources/images/audioanim.jpg")
+        self._pixmapAudioAnim = QPixmap(PATH_VISUALIZATION_ANIM)
         self._lblAudioAnim = QLabel()
         self._lblAudioAnim.setPixmap(self._pixmapAudioAnim)
 
@@ -250,7 +348,7 @@ class PlayerView(QDialog):
         # Play
         self._btnPlay = QPushButton("P")
         self._btnPlay.setToolTip("Play selected track")
-        self._btnPlay.setEnabled(False)
+        # self._btnPlay.setEnabled(False)
         self._btnPlay.clicked.connect(self.playAudio)
         # Pause
         self._btnPause = QPushButton("||")
@@ -312,9 +410,12 @@ class PlayerView(QDialog):
                 showMsg(APP_NAME, "Invalid file path", MsgBox.ERROR)
                 return RC.E_INVALID_FILE_PATH
             # play
-            data, fs = sf.read(strSelectedPath, dtype="float32")
-            sd.stop()
-            sd.play(data, fs)
+            # data, fs = sf.read(strSelectedPath, dtype="float32")
+            # sd.stop()
+            # sd.play(data, fs)
+            thrd = threading.Thread(target=playAudioOnDevice, args=[PLAYBACK_DEVICE_NUMBER, strSelectedPath])
+            thrd.start()
+            thrd.join()
             return RC.SUCCESS
         showMsg(APP_NAME, "Invalid file path", MsgBox.ERROR)
         return RC.E_INVALID_FILE_PATH
@@ -343,6 +444,7 @@ class PlayerView(QDialog):
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+    # createRunningOutputStream(PLAYBACK_DEVICE_NUMBER)
     dlg = PlayerView()
     dlg.show()
     sys.exit(app.exec_())
