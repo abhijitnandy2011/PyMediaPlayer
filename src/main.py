@@ -15,6 +15,7 @@ import platform
 import enum
 import json
 import argparse
+from time import sleep
 from datetime import datetime
 import queue
 import threading
@@ -32,13 +33,14 @@ else:
 
 # PyQt 5
 from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox
-from PyQt5.QtWidgets import QLineEdit, QPushButton, QListWidget
+from PyQt5.QtWidgets import QPushButton, QListWidget
 from PyQt5.QtWidgets import QLabel, QSlider
 from PyQt5.QtWidgets import QFileDialog
 from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout
 from PyQt5.QtWidgets import QWidget
 from PyQt5.QtGui     import QPixmap
 from PyQt5.QtCore    import Qt
+from PyQt5.QtCore    import pyqtSignal
 
 
 # -------------------------------------------------------------------
@@ -52,6 +54,7 @@ BLOCK_SIZE = 2048
 DATA_TYPE = "float32"
 NUM_CHANNELS = 1  # 2 does not work
 OUTPUT_STREAM_SAMPLE_RATE = 48000
+MAX_AUDIO_THREAD_STOP_WAIT_ITERATIONS = 1000
 
 # Image paths
 PATH_VISUALIZATION_ANIM = "../resources/images/audioanim.jpg"
@@ -99,7 +102,7 @@ class PlayerState(enum.IntEnum):
 g_previousPlayerState = None
 g_playerState = PlayerState.STOPPED
 
-
+g_audioThreadRunning = False
 
 #---------------------------------------------------------------------
 # Logging
@@ -129,7 +132,7 @@ class FileBrowser:
     # Select audio file
     def selectFile(parent, strTitle, strDir, strFilter):
         # strFilter = "Audio files (*.wav *.mp3)"
-        print(parent, strTitle, strDir, strFilter)
+        # print(parent, strTitle, strDir, strFilter)
         strFilter = "Audio files (*.wav *.mp3)"
         # fileDialog = QFileDialog(parent, strTitle, strDir, strFilter)
         # strFilter = "Audio files (*.wav *.mp3)"
@@ -177,14 +180,14 @@ def setVolume(levelPercent):
 #     output.start()
 #     return output
 
-
 def setPlayerState(newState):
     global g_previousPlayerState, g_playerState
     g_previousPlayerState = g_playerState
     g_playerState = newState
 
 def playAudioOnDevice(deviceNum, strAudioFilePath):
-    global g_previousPlayerState, g_playerState
+    global g_previousPlayerState, g_playerState, g_audioThreadRunning
+    g_audioThreadRunning = True
     # Local queue created every time
     q = queue.Queue(maxsize=BUFFER_SIZE)
     event = threading.Event()
@@ -242,11 +245,13 @@ def playAudioOnDevice(deviceNum, strAudioFilePath):
         print("Queue full")
     except Exception as e:
         print(type(e).__name__ + ': ' + str(e))
+    finally:
+        g_audioThreadRunning = False
 
 #---------------------------------------------------------------------
 # Uses model-view
 class TrackInfoWithVolumeControlWidget(QWidget):
-    """Play list widget"""
+    """Track info widget"""
     def __init__(self, model=None, ctrlr=None, parent=None):
         QWidget.__init__(self, parent=parent)
         layMain = QHBoxLayout(self)
@@ -271,21 +276,6 @@ class TrackInfoWithVolumeControlWidget(QWidget):
         layMain.addWidget(self._lblAudioAnim)
         layMain.addLayout(layTrackInfo)
 
-    def addMedia(self):
-        """Add media to playlist"""
-        lstFilenames = FileBrowser.selectFile(self, "Select Audio File", "Desktop", "Audio files (*.wav *.mp3)")
-        if lstFilenames and len(lstFilenames) > 0:
-            # self.playerModel.addMedia(lstFilenames)
-            # TODO: Update only file names in media list, not full paths: do in separate thread for long lists
-            self.lwMediaList.addItems(lstFilenames)
-            return RC.SUCCESS
-        return RC.NO_FILE_SELECTED
-
-    def removeMedia(self):
-        """Remove media from playlist"""
-        for item in self.lview.selectedItems():
-            self.lwMediaList.takeItem(self.lwMediaList.row(item))
-
     def volumeChanged(self, value):
         setVolume(value)
 
@@ -294,6 +284,16 @@ class TrackInfoWithVolumeControlWidget(QWidget):
 # Uses model-view
 class PlayListWidget(QWidget):
     """Play list widget"""
+    # Signals
+    # List of media added as strings & total items currently
+    sigMediaAdded         = pyqtSignal(list, int, name='sigMediaAdded')
+    # List of media removed as strings & total items currently
+    sigMediaRemoved       = pyqtSignal(list, int, name='sigMediaRemoved')
+    # TODO: Index of item clicked - view needs to get path from model
+    # sigMediaPlayRequested = pyqtSignal(int,  name='sigMediaPlayRequested')
+    # Temp: Completed path of clicked item as str till we have a model in place
+    sigMediaPlayRequested = pyqtSignal(str, name='sigMediaPlayRequested')
+
     def __init__(self, model=None, ctrlr=None, parent=None):
         QWidget.__init__(self, parent=parent)
         layPlayList = QVBoxLayout(self)
@@ -307,33 +307,38 @@ class PlayListWidget(QWidget):
         btnsLayout.addWidget(self._btnAdd)
         btnsLayout.addWidget(self._btnRem)
         layPlayList.addLayout(btnsLayout)
+        self._lwMediaList.doubleClicked.connect(lambda: self.sigMediaPlayRequested.emit(""))
 
     def addMedia(self):
         """Add media to playlist"""
         lstFilenames = FileBrowser.selectFile(self, "Select Audio File", "Desktop", "Audio files (*.wav *.mp3)")
-        print(lstFilenames)
+        # print(lstFilenames)
         if lstFilenames and len(lstFilenames) > 0:
             # self.playerModel.addMedia(lstFilenames)
             # TODO: Update only file names in media list, not full paths: do in separate thread for long lists
             numItems = self._lwMediaList.count()
             self._lwMediaList.addItems(lstFilenames)
+            # print("self.parent:", self, self.parent())
             if numItems == 0:
                 self._lwMediaList.setCurrentRow(0)
+            self.sigMediaAdded.emit(lstFilenames, self._lwMediaList.count())
             return RC.SUCCESS
         return RC.NO_FILE_SELECTED
 
     def removeMedia(self):
         """Remove media from playlist"""
+        lstFilenamesRemoved = []
         for item in self._lwMediaList.selectedItems():
             self._lwMediaList.takeItem(self._lwMediaList.row(item))
+            lstFilenamesRemoved.append(item.text())
+        self.sigMediaRemoved.emit(lstFilenamesRemoved, self._lwMediaList.count())
 
     def getSelectedMedia(self):
         # The ctrlr will look up the media path in the model & play it
         lstSelectedItems = self._lwMediaList.selectedItems()
-        print("lstSelectedItems:", lstSelectedItems)
+        # print("lstSelectedItems:", lstSelectedItems)
         if lstSelectedItems and len(lstSelectedItems) > 0:
             return lstSelectedItems[0].text()
-
 
 #---------------------------------------------------------------------
 # Model
@@ -358,17 +363,17 @@ class PlayerView(QDialog):
         # Play
         self._btnPlay = QPushButton("P")
         self._btnPlay.setToolTip("Play selected track")
-        # self._btnPlay.setEnabled(False)
+        self._btnPlay.setEnabled(False)
         self._btnPlay.clicked.connect(self.playAudio)
         # Pause
         self._btnPause = QPushButton("||")
         self._btnPause.setToolTip("Pause currently playing track")
-        # self._btnPause.setEnabled(False)
+        self._btnPause.setEnabled(False)
         self._btnPause.clicked.connect(self.pauseAudio)
         # Stop
         self._btnStop = QPushButton("S")
         self._btnStop.setToolTip("Stop currently playing track")
-        # self._btnStop.setEnabled(False)
+        self._btnStop.setEnabled(False)
         self._btnStop.clicked.connect(self.stopAudio)
         # Previous
         self._btnPrevious = QPushButton("|<")
@@ -408,6 +413,12 @@ class PlayerView(QDialog):
         dlgLayout.addLayout(btnsLayout)
         dlgLayout.addWidget(self._playlist)
         self.setLayout(dlgLayout)
+        # signals
+        self._playlist.sigMediaAdded.connect(self.playlistMediaAdded)
+        self._playlist.sigMediaPlayRequested.connect(self.playlistMediaPlayRequested)
+
+    def closeEvent(self, evnt):
+        setPlayerState(PlayerState.STOPPED)
 
     # Play audio
     def playAudio(self):
@@ -433,10 +444,14 @@ class PlayerView(QDialog):
                 showMsg(APP_NAME, "Empty file path", MsgBox.ERROR)
                 return RC.E_INVALID_FILE_PATH
         # Audio thread started successfully, switching now from stopped or paused state
+        self._btnPause.setEnabled(True)
+        self._btnStop.setEnabled(True)
         setPlayerState(PlayerState.PLAYING)
         return RC.SUCCESS
 
     def stopAudio(self):
+        self._btnPause.setEnabled(False)
+        self._btnStop.setEnabled(False)
         setPlayerState(PlayerState.STOPPED)
         # sd.stop()
 
@@ -455,6 +470,27 @@ class PlayerView(QDialog):
     def loopCurrentTrack(self):
         pass
 
+    def enableTrackCtrl(self):
+        pass
+
+    # Play audio
+    def playlistMediaAdded(self):
+        self._btnPlay.setEnabled(True)
+
+    def playlistMediaPlayRequested(self):
+        global g_audioThreadRunning
+        self.stopAudio()
+        sleep(0.20)
+        numTries = 0
+        while(g_audioThreadRunning):
+            sleep(0.20)     # this sleep() is needed or this thread will hog CPU
+            numTries += 1
+            if numTries > MAX_AUDIO_THREAD_STOP_WAIT_ITERATIONS:
+                print("Failed to stop audio thread". numTries)
+                return RC.E_FAIL
+        print(f"Stopped audio thread in {numTries} tries")
+        self.playAudio()
+        return RC.SUCCESS
 
 #---------------------------------------------------------------------
 
