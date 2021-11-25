@@ -258,9 +258,8 @@ class TrackInfoWithVolumeControlWidget(QWidget):
         self._pixmapAudioAnim = QPixmap(PATH_VISUALIZATION_ANIM)
         self._lblAudioAnim = QLabel()
         self._lblAudioAnim.setPixmap(self._pixmapAudioAnim)
-
         layTrackInfo = QVBoxLayout(self)
-        self._lblTrackName = QLabel("Track 1")
+        self._lblTrackName = QLabel("No track playing")
         self._sliderVolume = QSlider(Qt.Horizontal)
         self._sliderVolume.setMinimum(0)
         self._sliderVolume.setMaximum(100)
@@ -268,16 +267,19 @@ class TrackInfoWithVolumeControlWidget(QWidget):
         self._sliderVolume.setTickPosition(QSlider.TicksBelow)
         self._sliderVolume.setTickInterval(5)
         self._sliderVolume.valueChanged.connect(self.volumeChanged)
-
+        # Add widgets to layouts
         layTrackInfo.addWidget(self._lblTrackName)
         layTrackInfo.addWidget(self._sliderVolume)
-        # self._btnRem = QPushButton("Rem")
-        # self._btnRem.clicked.connect(self.removeMedia)
         layMain.addWidget(self._lblAudioAnim)
         layMain.addLayout(layTrackInfo)
+        # Connect track changed signal
+        parent.sigTrackChanged.connect(self.trackChanged)
 
     def volumeChanged(self, value):
         setVolume(value)
+
+    def trackChanged(self, strTrackName):
+        self._lblTrackName.setText(strTrackName)
 
 
 #---------------------------------------------------------------------
@@ -355,6 +357,9 @@ class PlayerCtrlr:
 # View
 class PlayerView(QDialog):
     """Player view"""
+    # Signal for currently playing track changed - will be emitted by model later, now view emits it
+    sigTrackChanged = pyqtSignal(str, name='sigTrackChanged')
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(APP_NAME)
@@ -439,23 +444,28 @@ class PlayerView(QDialog):
                 thrd = threading.Thread(target=playAudioOnDevice, args=[PLAYBACK_DEVICE_NUMBER, strSelectedPath])
                 thrd.start()
                 # thrd.join()
+                self.sigTrackChanged.emit(strSelectedPath)
             else:
                 print("Empty file path")
                 showMsg(APP_NAME, "Empty file path", MsgBox.ERROR)
                 return RC.E_INVALID_FILE_PATH
         # Audio thread started successfully, switching now from stopped or paused state
+        self._btnPlay.setEnabled(False)
         self._btnPause.setEnabled(True)
         self._btnStop.setEnabled(True)
         setPlayerState(PlayerState.PLAYING)
         return RC.SUCCESS
 
     def stopAudio(self):
+        self._btnPlay.setEnabled(True)
         self._btnPause.setEnabled(False)
         self._btnStop.setEnabled(False)
         setPlayerState(PlayerState.STOPPED)
         # sd.stop()
 
     def pauseAudio(self):
+        self._btnPlay.setEnabled(True)
+        self._btnPause.setEnabled(False)
         setPlayerState(PlayerState.PAUSED)
 
     def previousTrack(self):
@@ -493,6 +503,7 @@ class PlayerView(QDialog):
         return RC.SUCCESS
 
 #---------------------------------------------------------------------
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
