@@ -90,17 +90,21 @@ class MsgBox(enum.IntEnum):
 
 
 #---------------------------------------------------------------------
+# Player state
+class PlayerState(enum.IntEnum):
+    STOPPED = 0
+    PLAYING = 1
+    PAUSED  = 2
+
+g_previousPlayerState = None
+g_playerState = PlayerState.STOPPED
+
+
+
+#---------------------------------------------------------------------
 # Logging
 
 
-
-#---------------------------------------------------------------------
-# Player state
-
-
-
-#---------------------------------------------------------------------
-#
 
 #---------------------------------------------------------------------
 def showMsg(strTitle, strMsg, msgType):
@@ -174,7 +178,13 @@ def setVolume(levelPercent):
 #     return output
 
 
+def setPlayerState(newState):
+    global g_previousPlayerState, g_playerState
+    g_previousPlayerState = g_playerState
+    g_playerState = newState
+
 def playAudioOnDevice(deviceNum, strAudioFilePath):
+    global g_previousPlayerState, g_playerState
     # Local queue created every time
     q = queue.Queue(maxsize=BUFFER_SIZE)
     event = threading.Event()
@@ -213,11 +223,20 @@ def playAudioOnDevice(deviceNum, strAudioFilePath):
             with stream:
                 timeout = BLOCK_SIZE * BUFFER_SIZE/ f.samplerate
                 while data:
-                    data = f.buffer_read(BLOCK_SIZE, dtype=DATA_TYPE)
-                    q.put(data, timeout=timeout)
+                    if g_playerState == PlayerState.PLAYING:
+                        if g_previousPlayerState == PlayerState.PAUSED:
+                            stream.start()
+                        data = f.buffer_read(BLOCK_SIZE, dtype=DATA_TYPE)
+                        q.put(data, timeout=timeout)
+                    elif g_playerState == PlayerState.STOPPED:
+                        stream.stop()
+                        # print("Player stopped")
+                        break
+                    elif g_playerState == PlayerState.PAUSED:
+                        # print("Player paused")
+                        stream.stop()
                 event.wait()  # Wait until playback is finished
-    except KeyboardInterrupt:
-        print('Keyboard Interrupted by user')
+                setPlayerState(PlayerState.STOPPED)
     except queue.Full:
         # A timeout occurred, i.e. there was an error in the callback
         print("Queue full")
@@ -336,15 +355,6 @@ class PlayerView(QDialog):
         self.setWindowTitle(APP_NAME)
         # Main layout
         dlgLayout = QVBoxLayout()
-        # File browse
-        # fileBrowserLayout = QHBoxLayout()
-        # self._leditFilePath = QLineEdit()
-        # self._btnBrowse = QPushButton("Browse")
-        # fileBrowserLayout.addWidget(self._leditFilePath)
-        # fileBrowserLayout.addWidget(self._btnBrowse)
-        # self._btnBrowse.clicked.connect(self.selectFile)
-        # Buttons layout
-        btnsLayout = QHBoxLayout()
         # Play
         self._btnPlay = QPushButton("P")
         self._btnPlay.setToolTip("Play selected track")
@@ -353,12 +363,12 @@ class PlayerView(QDialog):
         # Pause
         self._btnPause = QPushButton("||")
         self._btnPause.setToolTip("Pause currently playing track")
-        self._btnPause.setEnabled(False)
+        # self._btnPause.setEnabled(False)
         self._btnPause.clicked.connect(self.pauseAudio)
         # Stop
         self._btnStop = QPushButton("S")
         self._btnStop.setToolTip("Stop currently playing track")
-        self._btnStop.setEnabled(False)
+        # self._btnStop.setEnabled(False)
         self._btnStop.clicked.connect(self.stopAudio)
         # Previous
         self._btnPrevious = QPushButton("|<")
@@ -380,7 +390,8 @@ class PlayerView(QDialog):
         self._btnLoopCurrentTrack.setToolTip("Loop currently playing track")
         self._btnLoopCurrentTrack.setEnabled(False)
         self._btnLoopCurrentTrack.clicked.connect(self.loopCurrentTrack)
-        # Add buttons
+        # Add buttons to layout
+        btnsLayout = QHBoxLayout()
         btnsLayout.addWidget(self._btnPrevious)
         btnsLayout.addWidget(self._btnPlay)
         btnsLayout.addWidget(self._btnPause)
@@ -388,7 +399,6 @@ class PlayerView(QDialog):
         btnsLayout.addWidget(self._btnNext)
         btnsLayout.addWidget(self._btnShuffle)
         btnsLayout.addWidget(self._btnLoopCurrentTrack)
-
         # Play list
         self._playlist = PlayListWidget(parent=self)
         # Add to main layout
@@ -401,31 +411,37 @@ class PlayerView(QDialog):
 
     # Play audio
     def playAudio(self):
-        # strFilePath = self._leditFilePath.text()
-        strSelectedPath = self._playlist.getSelectedMedia()
-        if strSelectedPath:
-            strSelectedPath = strSelectedPath.strip()
-            if not strSelectedPath:
-                print("Invalid file path")
-                showMsg(APP_NAME, "Invalid file path", MsgBox.ERROR)
+        global g_playerState
+        if  g_playerState == PlayerState.STOPPED:
+            # strFilePath = self._leditFilePath.text()
+            strSelectedPath = self._playlist.getSelectedMedia()
+            if strSelectedPath:
+                strSelectedPath = strSelectedPath.strip()
+                if not strSelectedPath:
+                    print("Invalid file path")
+                    showMsg(APP_NAME, "Invalid file path", MsgBox.ERROR)
+                    return RC.E_INVALID_FILE_PATH
+                # play
+                # data, fs = sf.read(strSelectedPath, dtype="float32")
+                # sd.stop()
+                # sd.play(data, fs)
+                thrd = threading.Thread(target=playAudioOnDevice, args=[PLAYBACK_DEVICE_NUMBER, strSelectedPath])
+                thrd.start()
+                # thrd.join()
+            else:
+                print("Empty file path")
+                showMsg(APP_NAME, "Empty file path", MsgBox.ERROR)
                 return RC.E_INVALID_FILE_PATH
-            # play
-            # data, fs = sf.read(strSelectedPath, dtype="float32")
-            # sd.stop()
-            # sd.play(data, fs)
-            thrd = threading.Thread(target=playAudioOnDevice, args=[PLAYBACK_DEVICE_NUMBER, strSelectedPath])
-            thrd.start()
-            thrd.join()
-            return RC.SUCCESS
-        showMsg(APP_NAME, "Invalid file path", MsgBox.ERROR)
-        return RC.E_INVALID_FILE_PATH
+        # Audio thread started successfully, switching now from stopped or paused state
+        setPlayerState(PlayerState.PLAYING)
+        return RC.SUCCESS
 
-    # Stop audio
     def stopAudio(self):
-        sd.stop()
+        setPlayerState(PlayerState.STOPPED)
+        # sd.stop()
 
     def pauseAudio(self):
-        pass
+        setPlayerState(PlayerState.PAUSED)
 
     def previousTrack(self):
         pass
